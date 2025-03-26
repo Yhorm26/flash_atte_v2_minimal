@@ -16,7 +16,7 @@ void forward_kernel_2(mykernelParamType param) {
 
     float Q_tile[8];
     float K_tile[8];
-    float scores[4];
+    float scores[Bc1 / 8];
 
     float row_m_prev = -INFINITY;
     float row_l_prev = 0;
@@ -52,7 +52,7 @@ void forward_kernel_2(mykernelParamType param) {
         // S = QK^T, row_m = rowmax(S)
         float row_m = -INFINITY;
         #pragma unroll
-        for (int x = 0; x < 4; x++){
+        for (int x = 0; x < Bc1 / 8; x++){
             scores[x] = 0.0f;
             #pragma unroll
             for (int y = 0; y < param.d / 8; y++){
@@ -61,7 +61,7 @@ void forward_kernel_2(mykernelParamType param) {
                 #pragma unroll
                 for (int m = 0; m < 8; m++){
                     Q_tile[m] = Qj[(tx / 8) * param.d + y * 8 + m];
-                    K_tile[m] = Kj[((tx % 8) * 4 + x) * param.d + y * 8 + m];
+                     K_tile[m] = Kj[((tx % 8) * (Bc1 / 8) + x) * param.d + y * 8 + m];
                 }
                 #pragma unroll
                 for (int m = 0; m < 8; m++){
@@ -82,7 +82,7 @@ void forward_kernel_2(mykernelParamType param) {
         // P = exp(S - row_m), row_l = rowsum(P)
         float row_l = 0;
         #pragma unroll
-        for (int x = 0; x < 4; x++) {
+        for (int x = 0; x < Bc1 / 8; x++) {
             scores[x] = __expf(scores[x] - row_m);
             row_l += scores[x];
         }
@@ -94,8 +94,8 @@ void forward_kernel_2(mykernelParamType param) {
         }
 
         #pragma unroll
-        for (int x = 0; x < 4; x++){
-            S[tx * 4 + x] = scores[x];
+        for (int x = 0; x < Bc1 / 8; x++){
+            S[tx * Bc1 / 8 + x] = scores[x];
         }
         __syncthreads();
 
