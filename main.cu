@@ -168,7 +168,7 @@ void launchKernel(
 }
 
 
-void launchKernelHalf(
+void launchKernel(
     mykernelParamType2 param, 
     void (*kernel)(mykernelParamType2), 
     int grid_x, int grid_y, int grid_z, 
@@ -278,9 +278,9 @@ int main(){
     attention_forward_cpu(Q, K, V, param.softmax_scale, O);
 
     // ************************************kernel_1***************************************************************************
-    launchKernel(param,forward_kernel_1, param.Tr, n_head, batch_size, param.Bc, sram_size, O, O_host, O_device, 0.001);
+    launchKernel(param,forward_kernel_1, param.Tr, n_head, batch_size, param.Bc, sram_size, O, O_host, O_device, 0.0001);
     // ************************************kernel_2***************************************************************************
-    launchKernel(param,forward_kernel_2, param.Tr, n_head, batch_size, param.Bc * 8, sram_size, O, O_host, O_device, 0.001);
+    launchKernel(param,forward_kernel_2, param.Tr, n_head, batch_size, param.Bc * 8, sram_size, O, O_host, O_device, 0.0001);
     // ************************************kernel_3***************************************************************************
     mykernelParamType2 param2;
     param2.Q             = Q_device_half;
@@ -297,7 +297,7 @@ int main(){
 
     int sram_size2 = (4 * param2.Bc * head_embd * sizeof(half)) + param2.Bc * param2.Br * sizeof(half);
 
-    launchKernelHalf(param2, forward_kernel_3, param.Tr / 2, n_head, batch_size, param.Bc * 8, sram_size2, O, O_host, O_device, 0.04);
+    launchKernel(param2, forward_kernel_3, param.Tr / 2, n_head, batch_size, param.Bc * 8, sram_size2, O, O_host, O_device, 0.04);
     // ****************************************************************************************************************************
 
     cudaFree(Q_device);
