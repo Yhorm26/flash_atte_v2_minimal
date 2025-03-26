@@ -5,11 +5,11 @@ flash_attention v2的简易实现
 
 在v100 上编译：
 
-```nvcc *.cu -o flash -arch=sm_70
+```nvcc *.cu -o flash -arch=sm_70```
 
 运行： 
 
-```./flash
+```./flash```
             
 在V100上运行的结果：
 
