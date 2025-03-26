@@ -297,6 +297,34 @@ int main(){
     printf("Verify the result of kernel_3 function\n");
     verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.04);
 
+    // ************************************kernel_4*************************************************
+    dim3 grid_dim4(param2.Tr / 2, n_head, batch_size);
+    dim3 block_dim4(param2.Bc * 8);
+
+    // 预热
+    forward_kernel_4<<<grid_dim4, block_dim4, sram_size2>>>(param2);
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start,0);
+    time_elapsed=0.0;
+
+    for (int i = 0; i < 100; i++){
+        forward_kernel_4<<<grid_dim4, block_dim4, sram_size2>>>(param2);
+    }
+    
+    cudaEventRecord(stop,0);
+
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&time_elapsed,start,stop);
+
+    printf("kernel_4 time: %f us\n", time_elapsed*1000 / 100);
+    printf("Verify the result of kernel_4 function\n");
+    verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.04);
+
     // *********************************************************************************************
 
     cudaFree(Q_device);
