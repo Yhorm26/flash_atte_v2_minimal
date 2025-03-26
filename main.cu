@@ -8,6 +8,11 @@
 #include <cuda_runtime.h>
 #include "flash.h"
 
+#define batch_size 2
+#define n_head 2
+#define seq_len 1024
+#define head_embd 64
+
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -24,10 +29,6 @@ std::uniform_real_distribution<float> distribution(0.0f, 10.0f);
 void verfiy(
     float* O, 
     float* O_host,
-    int batch_size,
-    int n_head,
-    int seq_len,
-    int head_embd,
     float range_of_error)
 {
     int error=0;
@@ -50,24 +51,20 @@ void attention_forward_cpu(
     float* Q, 
     float* K, 
     float* V, 
-    int batch_size, 
-    int num_heads, 
-    int seq_len, 
-    int head_dim, 
     float sqrt_head_dim, 
     float* output)
 {
 
-    const int head_size = seq_len * head_dim;
+    const int head_size = seq_len * head_embd;
     
     // 临时存储注意力分数
     float* scores = new float[seq_len * seq_len];
 
     for (int b = 0; b < batch_size; ++b) {
         
-        for (int h = 0; h < num_heads; ++h) {
+        for (int h = 0; h < n_head; ++h) {
             // 获取当前head的指针偏移量
-            const int base_offset = b * num_heads * head_size + h * head_size;
+            const int base_offset = b * n_head * head_size + h * head_size;
             const float* Q_ptr = Q + base_offset;
             const float* K_ptr = K + base_offset;
             const float* V_ptr = V + base_offset;
@@ -77,8 +74,8 @@ void attention_forward_cpu(
             for (int i = 0; i < seq_len; ++i) {
                 for (int j = 0; j < seq_len; ++j) {
                     float sum = 0.0f;
-                    for (int k = 0; k < head_dim; ++k) {
-                        sum += Q_ptr[i * head_dim + k] * K_ptr[j * head_dim + k];
+                    for (int k = 0; k < head_embd; ++k) {
+                        sum += Q_ptr[i * head_embd + k] * K_ptr[j * head_embd + k];
                     }
                     scores[i * seq_len + j] = sum * sqrt_head_dim;
                 }
@@ -109,12 +106,12 @@ void attention_forward_cpu(
 
             // 4. 手动实现注意力加权矩阵乘法
             for (int i = 0; i < seq_len; ++i) {
-                for (int k = 0; k < head_dim; ++k) {
+                for (int k = 0; k < head_embd; ++k) {
                     float sum = 0.0f;
                     for (int j = 0; j < seq_len; ++j) {
-                        sum += scores[i * seq_len + j] * V_ptr[j * head_dim + k];
+                        sum += scores[i * seq_len + j] * V_ptr[j * head_embd + k];
                     }
-                    out_ptr[i * head_dim + k] = sum;
+                    out_ptr[i * head_embd + k] = sum;
                 }
             }
         }
@@ -124,12 +121,101 @@ void attention_forward_cpu(
 }
 
 
-int main(){
-    int batch_size = 2;
-    int n_head = 2;
-    int seq_len = 1024;
-    int head_embd = 64;
+void launchKernel(
+    mykernelParamType param, 
+    void (*kernel)(mykernelParamType), 
+    int grid_x, int grid_y, int grid_z, 
+    int block_x, 
+    int sram_size, 
+    float* O,
+    float* O_host,
+    float* O_device,
+    float range_of_error) 
+{
+    dim3 grid_dim(grid_x, grid_y, grid_z);
+    dim3 block_dim(block_x);
 
+    // 预热
+    kernel<<<grid_dim, block_dim, sram_size>>>(param);
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaMemcpy(O_host, O_device, batch_size*n_head*seq_len*head_embd*sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaEvent_t start,stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start,0);
+    float time_elapsed=0.0;
+
+    for (int i = 0; i < 100; i++){
+        kernel<<<grid_dim, block_dim, sram_size>>>(param);
+    }
+    
+    cudaEventRecord(stop,0);
+
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&time_elapsed,start,stop);
+
+    printf("kernel time: %f us\n", time_elapsed*1000 / 100);
+    printf("Verify the result of kernel function\n");
+
+    verfiy(O, O_host, range_of_error);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+}
+
+
+void launchKernelHalf(
+    mykernelParamType2 param, 
+    void (*kernel)(mykernelParamType2), 
+    int grid_x, int grid_y, int grid_z, 
+    int block_x, 
+    int sram_size, 
+    float* O,
+    float* O_host,
+    float* O_device,
+    float range_of_error) 
+{
+    dim3 grid_dim(grid_x, grid_y, grid_z);
+    dim3 block_dim(block_x);
+
+    // 预热
+    kernel<<<grid_dim, block_dim, sram_size>>>(param);
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaMemcpy(O_host, O_device, batch_size*n_head*seq_len*head_embd*sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaEvent_t start,stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start,0);
+    float time_elapsed=0.0;
+
+    for (int i = 0; i < 100; i++){
+        kernel<<<grid_dim, block_dim, sram_size>>>(param);
+    }
+    
+    cudaEventRecord(stop,0);
+
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&time_elapsed,start,stop);
+
+    printf("kernel time: %f us\n", time_elapsed*1000 / 100);
+    printf("Verify the result of kernel function\n");
+
+    verfiy(O, O_host, range_of_error);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+}
+
+
+int main(){
     float *Q      = (float*)malloc(batch_size*n_head*seq_len*head_embd*sizeof(float));
     float *K      = (float*)malloc(batch_size*n_head*seq_len*head_embd*sizeof(float));
     float *V      = (float*)malloc(batch_size*n_head*seq_len*head_embd*sizeof(float));
@@ -185,147 +271,34 @@ int main(){
     param.softmax_scale = 1.0 / sqrt(head_embd);
 
     // 计算每个线程块所需的SRAM大小
-    const int sram_size = (3 * param.Bc * head_embd * sizeof(float)) + (param.Bc * param.Br * sizeof(float));
+    int sram_size = (3 * param.Bc * head_embd * sizeof(float)) + (param.Bc * param.Br * sizeof(float));
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
     printf("Max shared memory: %d, requested shared memory: %d \n", max_sram_size, sram_size);
+    attention_forward_cpu(Q, K, V, param.softmax_scale, O);
 
-    // ************************************kernel_1***************************************************
-    dim3 grid_dim(param.Tr, n_head, batch_size);
-    dim3 block_dim(param.Bc);
-
-    // 预热
-    forward_kernel_1<<<grid_dim, block_dim, sram_size>>>(param);
-
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cudaMemcpy(O_host, O_device, batch_size*n_head*seq_len*head_embd*sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaEvent_t start,stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start,0);
-    float time_elapsed=0.0;
-
-    for (int i = 0; i < 100; i++){
-        forward_kernel_1<<<grid_dim, block_dim, sram_size>>>(param);
-    }
-    
-    cudaEventRecord(stop,0);
-
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&time_elapsed,start,stop);
-
-    printf("kernel_1 time: %f us\n", time_elapsed*1000 / 100);
-
-    attention_forward_cpu(Q, K, V, batch_size, n_head, seq_len, head_embd, param.softmax_scale, O);
-
-    printf("Verify the result of kernel_1 function\n");
-    verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.001);
-
-    // ************************************kernel_2*************************************************
-
-    dim3 grid_dim2(param.Tr, n_head, batch_size);
-    dim3 block_dim2(param.Bc * 8);
-
-    // 预热
-    forward_kernel_2<<<grid_dim2, block_dim2, sram_size>>>(param);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cudaMemcpy(O_host, O_device, batch_size*n_head*seq_len*head_embd*sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start,0);
-    time_elapsed  = 0.0;
-
-    for (int i = 0; i < 100; i++){
-       forward_kernel_2<<<grid_dim2, block_dim2, sram_size>>>(param);
-    }
-    
-    cudaEventRecord(stop,0);
-
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&time_elapsed,start,stop);
-
-    printf("kernel_2 time: %f us\n", time_elapsed*1000 / 100);
-    printf("Verify the result of kernel_2 function\n");
-    verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.001);
-    // ************************************kernel_3*************************************************
+    // ************************************kernel_1***************************************************************************
+    launchKernel(param,forward_kernel_1, param.Tr, n_head, batch_size, param.Bc, sram_size, O, O_host, O_device, 0.001);
+    // ************************************kernel_2***************************************************************************
+    launchKernel(param,forward_kernel_2, param.Tr, n_head, batch_size, param.Bc * 8, sram_size, O, O_host, O_device, 0.001);
+    // ************************************kernel_3***************************************************************************
     mykernelParamType2 param2;
-    param2.Q            = Q_device_half;
-    param2.K            = K_device_half;
-    param2.V            = V_device_half;
-    param2.O            = O_device;
-    param2.N            = seq_len;
-    param2.d            = head_embd;
+    param2.Q             = Q_device_half;
+    param2.K             = K_device_half;
+    param2.V             = V_device_half;
+    param2.O             = O_device;
+    param2.N             = seq_len;
+    param2.d             = head_embd;
     param2.Bc            = 32;
     param2.Br            = 64;
     param2.Tc            = ceil((float)seq_len / param2.Bc);
     param2.Tr            = ceil((float)seq_len / param2.Br);
     param2.softmax_scale = 1.0 / sqrt(head_embd);
 
-    dim3 grid_dim3(param2.Tr / 2, n_head, batch_size);
-    dim3 block_dim3(param2.Bc * 8);
-    const int sram_size2 = (4 * param2.Bc * head_embd * sizeof(half)) + param2.Bc * param2.Br * sizeof(half);
+    int sram_size2 = (4 * param2.Bc * head_embd * sizeof(half)) + param2.Bc * param2.Br * sizeof(half);
 
-    // 预热
-    forward_kernel_3<<<grid_dim3, block_dim3, sram_size2>>>(param2);
-
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cudaMemcpy(O_host, O_device, batch_size*n_head*seq_len*head_embd*sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start,0);
-    time_elapsed=0.0;
-
-    for (int i = 0; i < 100; i++){
-        forward_kernel_3<<<grid_dim3, block_dim3, sram_size2>>>(param2);
-    }
-    
-    cudaEventRecord(stop,0);
-
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&time_elapsed,start,stop);
-
-    printf("kernel_3 time: %f us\n", time_elapsed*1000 / 100);
-    printf("Verify the result of kernel_3 function\n");
-    verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.04);
-
-    // ************************************kernel_4*************************************************
-    dim3 grid_dim4(param2.Tr / 2, n_head, batch_size);
-    dim3 block_dim4(param2.Bc * 8);
-
-    // 预热
-    forward_kernel_4<<<grid_dim4, block_dim4, sram_size2>>>(param2);
-
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start,0);
-    time_elapsed=0.0;
-
-    for (int i = 0; i < 100; i++){
-        forward_kernel_4<<<grid_dim4, block_dim4, sram_size2>>>(param2);
-    }
-    
-    cudaEventRecord(stop,0);
-
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&time_elapsed,start,stop);
-
-    printf("kernel_4 time: %f us\n", time_elapsed*1000 / 100);
-    printf("Verify the result of kernel_4 function\n");
-    verfiy(O, O_host, batch_size, n_head, seq_len, head_embd, 0.04);
-
-    // *********************************************************************************************
+    launchKernelHalf(param2, forward_kernel_3, param.Tr / 2, n_head, batch_size, param.Bc * 8, sram_size2, O, O_host, O_device, 0.04);
+    // ****************************************************************************************************************************
 
     cudaFree(Q_device);
     cudaFree(K_device);
