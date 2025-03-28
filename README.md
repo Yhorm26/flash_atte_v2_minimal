@@ -3,9 +3,9 @@ flash_attention v2的简易实现
 
 目前还没有处理边界问题和一些功能，只计算了Softmax(Q*K.T)*V
 
-在A100 上编译：
+在A100 , src目录下编译：
 
-```nvcc *.cu -o flash -arch=sm_80 -std=c++11```
+```nvcc -I ../include *.cu -o flash -arch=sm_80 -std=c++11```
 
 运行： 
 
@@ -15,7 +15,7 @@ flash_attention v2的简易实现
 
 Max shared memory: 49152, requested shared memory: 28672
 
-kernel time: 10475.528320 us
+kernel time: 12181.115234 us
 
 Verify the result of kernel function
 
@@ -23,7 +23,7 @@ Verify the result of kernel function
 
 ==================finish,error:0==================
 
-kernel time: 1864.371216 us
+kernel time: 4033.533447 us
 
 Verify the result of kernel function
 
@@ -33,7 +33,7 @@ Verify the result of kernel function
 
 Max shared memory: 49152, kernel_3 requested shared memory: 36864
 
-kernel time: 799.848877 us
+kernel time: 796.037415 us
 
 Verify the result of kernel function
 
@@ -41,13 +41,22 @@ Verify the result of kernel function
 
 ==================finish,error:0==================
 
-kernel time: 338.784332 us
+kernel time: 338.171844 us
 
 Verify the result of kernel function
 
 ===================start verfiy===================
 
 ==================finish,error:0==================
+
+kernel time: 276.157104 us
+
+Verify the result of kernel function
+
+===================start verfiy===================
+
+==================finish,error:0==================
+
 
 
 
