@@ -1,4 +1,4 @@
-# flash_atte_v2_minimal
+# flash_attn_v2_minimal
 flash_attention v2的简易实现
 
 目前还没有处理边界问题和一些功能，只计算了Softmax(Q*K.T)*V
