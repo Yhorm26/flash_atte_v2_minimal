@@ -6,11 +6,12 @@
 #include <cstdint>
 using namespace nvcuda;
 
-__device__ inline void load_smem_to_registers(uint32_t (&a_frag)[4], uint32_t (&b_frag)[4], const half* a_ptr, const half* b_ptr);
-__device__ inline void mma(float (&c)[8], const uint32_t (&a)[4], const uint32_t (&b)[4]);
-__device__ inline void store_mma_result(float (&c)[8], half* ptr, int M, int lane_id);
-__device__ inline void atomicMaxFloat(float* addr, float value);
+#define HMMA16816F32(RD0, RD1, RD2, RD3, RA0, RA1, RA2, RA3, RB0, RB1, RC0, RC1, RC2, RC3) asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,  %1,  %2,  %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n" : "+f"(RD0), "+f"(RD1), "+f"(RD2), "+f"(RD3) : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "f"(RC0), "f"(RC1), "f"(RC2), "f"(RC3))
+#define LDMATRIX_X2(R0, R1, addr) asm volatile( "ldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n"  : "=r"(R0), "=r"(R1) : "r"(addr))
+#define LDMATRIX_X4(R0, R1, R2, R3, addr) asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3) : "r"(addr))
+#define LDMATRIX_X2_T(R0, R1, addr) asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n" : "=r"(R0), "=r"(R1) : "r"(addr))
 
+__device__ inline uint32_t pack_float_to_uint32(float num1, float num2);
 
 __global__
 void forward_kernel_4(mykernelParamType2 param) {
@@ -28,28 +29,26 @@ void forward_kernel_4(mykernelParamType2 param) {
 
     extern __shared__ half sram[];
     int tile_size = param.Bc * param.d;
-    half* Qj = sram;
-    half* Kj = &sram[tile_size * 2];
-    half* Vj = &sram[tile_size * 3];
-    half* S  = &sram[tile_size * 4];
+    half* Qj     = sram;
+    half* Kj     = &sram[param.Br * param.d];
+    half* Vj     = &sram[param.Br * param.d + tile_size];
 
-    __shared__ float l_prev[64];
-    __shared__ float m_prev[64];
-    __shared__ float l_new[64];
-    __shared__ float m_new[64];
+    float row_l_prev1 = 0;
+    float row_l_prev2 = 0;
+    float row_m_prev1 = -INFINITY;
+    float row_m_prev2 = -INFINITY;
 
-    if(tx < 64){
-        l_prev[tx] = 0.0f;
-        m_prev[tx] = -INFINITY;
-    }
+    const int load_Q_num  = param.Br * param.d / blockDim.x;
+    const int load_KV_num = param.Bc * param.d / blockDim.x;
     
     uint32_t a_frag[4];
     uint32_t b_frag[4];
-    float c_frag[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float    c_frag[Bc4/16][8];
+    uint32_t d_frag[Bc4/16][4];
 
     #pragma unroll
-    for (int i = 0; i < param.d / 4; i++){
-        Qj[tx * (param.d / 4) + i] = Q[tx * (param.d / 4) + i];
+    for (int i = 0; i < load_Q_num; i++){
+        Qj[tx * load_Q_num + i] = Q[tx * load_Q_num + i];
     }
 
     __syncthreads();
@@ -57,13 +56,9 @@ void forward_kernel_4(mykernelParamType2 param) {
     for (int i = 0; i < param.Tc; i++){
         
         #pragma unroll
-        for (int j = 0; j < param.d / 8; j++){
-            Kj[(tx * param.d / 8) + j] = K[(tx * param.d / 8) + j];
-        }
-
-        #pragma unroll
-        for (int j = 0; j < param.d / 8; j++){
-            Vj[(tx / 8) + ((tx % 8) * 8 + j) * param.Bc] = V[(tx * param.d / 8) + j];
+        for (int j = 0; j < load_KV_num; j++){
+            Kj[tx * load_KV_num + j] = K[tx * load_KV_num + j];
+            Vj[tx * load_KV_num + j] = V[tx * load_KV_num + j];
         }
         
         K += tile_size;
@@ -75,189 +70,148 @@ void forward_kernel_4(mykernelParamType2 param) {
         memset(c_frag, 0, sizeof(c_frag));
         #pragma unroll
         for (int x = 0; x < param.d / 16; x++){
-            const half* aOffsetPtr = Qj + (warp_id / 2) * param.d * 16 + 16 * x + (tx % 16) * (param.d / 2) + tx / 16 * 4;
-            const half* bOffsetPtr = Kj + (warp_id % 2) * param.d * 16 + 16 * x + (tx % 16) * (param.d / 2) + tx / 16 * 4;
-
-            load_smem_to_registers(a_frag, b_frag, aOffsetPtr, bOffsetPtr);
-
-            mma(c_frag, a_frag, b_frag);
-        }
-
-        int lm_offset = (warp_id / 2) * 16 + lane_id / 4;
-
-        #pragma unroll
-        for (int iter = 0; iter < 2; iter++){
-
-            // row_m = rowmax(S)
-            float row_m = -INFINITY;
-            for (int x = 0; x < 4; x++){
-                c_frag[x + iter * 4] *= param.softmax_scale;
-                if (c_frag[x + iter * 4] > row_m)    row_m = c_frag[x + iter * 4];
-            }
-
+            uint32_t aOffsetPtr = __cvta_generic_to_shared(&Qj[warp_id*param.d*16+x*16+(lane_id%16)*param.d+(lane_id/16)*8]);
+            LDMATRIX_X4(a_frag[0], a_frag[1], a_frag[2], a_frag[3], aOffsetPtr);
             #pragma unroll
-            for (int x = 3; x >= 1; x /= 2){
-                float row_m_other = __shfl_xor_sync(0xffffffff, row_m, x, 4);
-                row_m = fmaxf(row_m, row_m_other);
-            }
+            for (int y = 0; y < param.Bc / 16; y++){
+                uint32_t bOffsetPtr = __cvta_generic_to_shared(&Kj[y*param.d*16+x*16+(lane_id%16)*param.d+(lane_id/16)*8]);
+                LDMATRIX_X4(b_frag[0], b_frag[2], b_frag[1], b_frag[3], bOffsetPtr);
+                __syncwarp();
 
-            if(lane_id == 0){
-                atomicMaxFloat(m_new + lm_offset + iter * 8, row_m);
-            }
-            
-            // P = exp(S - row_m), row_l = rowsum(P)
-            float row_l = 0;
-            #pragma unroll
-            for (int x = 0; x < 4; x++) {
-                c_frag[x + iter * 4] = __expf(c_frag[x + iter * 4] - row_m);
-                row_l += c_frag[x + iter * 4];
-            }
+                HMMA16816F32(c_frag[y][0], c_frag[y][1], c_frag[y][4], c_frag[y][5], \
+                             a_frag[0], a_frag[1], a_frag[2], a_frag[3], \
+                             b_frag[0], b_frag[1], \
+                             c_frag[y][0], c_frag[y][1], c_frag[y][4], c_frag[y][5]);
 
-            #pragma unroll
-            for (int x = 3; x >= 1; x /= 2){
-                float row_l_other = __shfl_xor_sync(0xffffffff, row_l, x, 4);
-                row_l += row_l_other;
-            }
-
-            if(lane_id == 0){
-                atomicMaxFloat(l_new + lm_offset + iter * 8, row_l);
+                HMMA16816F32(c_frag[y][2], c_frag[y][3], c_frag[y][6], c_frag[y][7], \
+                             a_frag[0], a_frag[1], a_frag[2], a_frag[3], \
+                             b_frag[2], b_frag[3], \
+                             c_frag[y][2], c_frag[y][3], c_frag[y][6], c_frag[y][7]);
             }
         }
-
-        half* cOffsetPtr = S + (warp_id / 2) * param.Bc * 16 + (warp_id % 2) * 16;
-        store_mma_result(c_frag, cOffsetPtr, param.Bc, lane_id);
 
         __syncthreads();
 
-        float row_m_new1 = fmaxf(m_new[lm_offset], m_prev[lm_offset]);
-        float row_m_new2 = fmaxf(m_new[lm_offset + 8], m_prev[lm_offset + 8]);
-        float row_l_new1 = fmaxf(l_new[lm_offset], l_prev[lm_offset]);
-        float row_l_new2 = fmaxf(l_new[lm_offset + 8], l_prev[lm_offset + 8]);
+        float row_m1 = -INFINITY;
+        float row_m2 = -INFINITY;
+        #pragma unroll
+        for (int x = 0; x < param.Bc / 16; x++){
+            #pragma unroll
+            for (int y = 0; y < 4; y++){
+                c_frag[x][y]     *= param.softmax_scale;
+                c_frag[x][y + 4] *= param.softmax_scale;
+                if (c_frag[x][y]     > row_m1)    row_m1 = c_frag[x][y]    ;
+                if (c_frag[x][y + 4] > row_m2)    row_m2 = c_frag[x][y + 4];
+            }
+        }
+
+        #pragma unroll
+        for (int x = 3; x >= 1; x /= 2){
+            float row_m_other = __shfl_xor_sync(0xffffffff, row_m1, x, 4);
+            row_m1 = fmaxf(row_m1, row_m_other);
+            row_m_other = __shfl_xor_sync(0xffffffff, row_m2, x, 4);
+            row_m2 = fmaxf(row_m2, row_m_other);
+        }
+
+        float row_l1 = 0;
+        float row_l2 = 0;
+        #pragma unroll
+        for (int x = 0; x < param.Bc / 16; x++) {
+            #pragma unroll
+            for (int y = 0; y < 4; y++){
+                c_frag[x][y] = __expf(c_frag[x][y] - row_m1);
+                row_l1 += c_frag[x][y];
+                c_frag[x][y + 4] = __expf(c_frag[x][y + 4] - row_m2);
+                row_l2 += c_frag[x][y + 4];
+            }
+        }
+
+        #pragma unroll
+        for (int x = 3; x >= 1; x /= 2){
+            float row_l_other = __shfl_xor_sync(0xffffffff, row_l1, x, 4);
+            row_l1 += row_l_other;
+            row_l_other = __shfl_xor_sync(0xffffffff, row_l2, x, 4);
+            row_l2 += row_l_other;
+        }
+
+        float row_m_new1 = fmaxf(row_m1, row_m_prev1);
+        float row_m_new2 = fmaxf(row_m2, row_m_prev2);
+        float row_l_new1 = (__expf(row_m_prev1 - row_m_new1) * row_l_prev1) + (__expf(row_m1 - row_m_new1) * row_l1);
+        float row_l_new2 = (__expf(row_m_prev2 - row_m_new2) * row_l_prev2) + (__expf(row_m2 - row_m_new2) * row_l2);
+
+        #pragma unroll
+        for (int x = 0; x < param.Bc / 16; x++){
+            #pragma unroll
+            for (int y = 0; y < 4; y++){
+                d_frag[x][y] = pack_float_to_uint32(c_frag[x][2*y], c_frag[x][2*y+1]);
+            }
+        }
+
+        __syncthreads();
 
         float factor1 = 1 / row_l_new1;
-        float factor2 = l_prev[lm_offset] * __expf(m_prev[lm_offset] - row_m_new1);
-        float factor3 = __expf(m_prev[lm_offset] - row_m_new1);
+        float factor2 = row_l_prev1 * __expf(row_m_prev1 - row_m_new1);
+        float factor3 = __expf(row_m1 - row_m_new1);
 
         float factor4 = 1 / row_l_new2;
-        float factor5 = l_prev[lm_offset + 8] * __expf(m_prev[lm_offset + 8] - row_m_new2);
-        float factor6 = __expf(m_prev[lm_offset + 8] - row_m_new2);
+        float factor5 = row_l_prev2 * __expf(row_m_prev2 - row_m_new2);
+        float factor6 = __expf(row_m2 - row_m_new2);
 
         // S = S * V
         #pragma unroll
-        for (int x = 0; x < (param.d / 2) / 16; x++){
+        for (int x = 0; x < param.d / 16; x++){
             memset(c_frag, 0, sizeof(c_frag));
             #pragma unroll
             for(int y = 0; y < param.Bc / 16; y++){
-                const half* aOffsetPtr = S + (warp_id / 2) * param.Bc * 16 + 16 * y + (tx % 16) * (param.Bc / 2) + tx / 16 * 4;
-                const half* bOffsetPtr = Vj + (warp_id % 2) * (param.d / 2) * param.Bc + x * param.Bc * 16 + y * 16 + + (tx % 16) * (param.Bc / 2) + tx / 16 * 4;
+                uint32_t bOffsetPtr = __cvta_generic_to_shared(&Vj[y*param.d*16+x*16+(lane_id%16)*param.d]);
+                LDMATRIX_X2_T(b_frag[0], b_frag[1], bOffsetPtr);
+                bOffsetPtr = __cvta_generic_to_shared(&Vj[y*param.d*16+x*16+(lane_id%16)*param.d+8]);;
+                LDMATRIX_X2_T(b_frag[2], b_frag[3], bOffsetPtr);
 
-                load_smem_to_registers(a_frag, b_frag, aOffsetPtr, bOffsetPtr);
+                HMMA16816F32(c_frag[0][0], c_frag[0][1], c_frag[0][4], c_frag[0][5], \
+                             d_frag[y][0], d_frag[y][2], d_frag[y][1], d_frag[y][3], \
+                             b_frag[0], b_frag[1], \
+                             c_frag[0][0], c_frag[0][1], c_frag[0][4], c_frag[0][5]);
 
-                mma(c_frag, a_frag, b_frag);
+                HMMA16816F32(c_frag[0][2], c_frag[0][3], c_frag[0][6], c_frag[0][7], \
+                             d_frag[y][0], d_frag[y][2], d_frag[y][1], d_frag[y][3], \
+                             b_frag[2], b_frag[3], \
+                             c_frag[0][2], c_frag[0][3], c_frag[0][6], c_frag[0][7]);
+
+                __syncthreads();
             }
 
-            int offset = (warp_id / 2) * param.d * 16 + (warp_id % 2) * param.d / 2  \
-                        + x * 16 + (lane_id / 4) * param.d + (lane_id % 4) * 2;
+            int offset = warp_id * param.d * 16 + x * 16 + (lane_id / 4) * param.d + (lane_id % 4) * 2;
 
-            O[offset]     = factor1 * ((factor2 * O[offset]) + (factor3 * c_frag[0]));
-            O[offset + 1] = factor1 * ((factor2 * O[offset]) + (factor3 * c_frag[1]));
-            O[offset + 2] = factor1 * ((factor2 * O[offset]) + (factor3 * c_frag[2]));
-            O[offset + 3] = factor1 * ((factor2 * O[offset]) + (factor3 * c_frag[3]));
+            O[offset]     = factor1 * ((factor2 * O[offset    ]) + (factor3 * c_frag[0][0]));
+            O[offset + 1] = factor1 * ((factor2 * O[offset + 1]) + (factor3 * c_frag[0][1]));
+            O[offset + 8] = factor1 * ((factor2 * O[offset + 8]) + (factor3 * c_frag[0][2]));
+            O[offset + 9] = factor1 * ((factor2 * O[offset + 9]) + (factor3 * c_frag[0][3]));
 
             offset += 8 * param.d;
 
-            O[offset]     = factor4 * ((factor5 * O[offset]) + (factor6 * c_frag[4]));
-            O[offset + 1] = factor4 * ((factor5 * O[offset]) + (factor6 * c_frag[5]));
-            O[offset + 2] = factor4 * ((factor5 * O[offset]) + (factor6 * c_frag[6]));
-            O[offset + 3] = factor4 * ((factor5 * O[offset]) + (factor6 * c_frag[7]));
+            O[offset]     = factor4 * ((factor5 * O[offset    ]) + (factor6 * c_frag[0][4]));
+            O[offset + 1] = factor4 * ((factor5 * O[offset + 1]) + (factor6 * c_frag[0][5]));
+            O[offset + 8] = factor4 * ((factor5 * O[offset + 8]) + (factor6 * c_frag[0][6]));
+            O[offset + 9] = factor4 * ((factor5 * O[offset + 9]) + (factor6 * c_frag[0][7]));
         }
 
         __syncthreads();
 
-        if (tx < 64){
-            l_prev[tx] = l_new[tx];
-            m_prev[tx] = m_new[tx];
-        }
-        __syncthreads();
+        row_l_prev1 = row_l_new1;
+        row_l_prev2 = row_l_new2;
+        row_m_prev1 = row_m_new1;
+        row_m_prev2 = row_m_new2;
     }
 }
 
 
-__device__ inline void load_smem_to_registers(
-    uint32_t (&a_frag)[4],
-    uint32_t (&b_frag)[4],
-    const half* a_ptr,
-    const half* b_ptr)
-{
-    asm volatile(
-        "ldmatrix.sync.aligned.x4.m8n8.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-        : "=r"(a_frag[0]), "=r"(a_frag[1]), "=r"(a_frag[2]), "=r"(a_frag[3])
-        : "l"(__cvta_generic_to_shared(a_ptr))
-    );
-    asm volatile(
-        "ldmatrix.sync.aligned.x4.m8n8.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-        : "=r"(b_frag[0]), "=r"(b_frag[1]), "=r"(b_frag[2]), "=r"(b_frag[3])
-        : "l"(__cvta_generic_to_shared(b_ptr))
-    );
-}
+__device__ inline uint32_t pack_float_to_uint32(float num1, float num2) {
+    half a = __float2half(num1);
+    half b = __float2half(num2);
 
+    uint16_t a_bits = __half_as_ushort(a);
+    uint16_t b_bits = __half_as_ushort(b);
 
-__device__ inline void mma(
-    float (&c)[8],
-    const uint32_t (&a)[4],
-    const uint32_t (&b)[4])
-{
-    asm volatile(
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%0, %1, %2, %3};\n"
-        : "+f"(c[0]), "+f"(c[1]), "+f"(c[4]), "+f"(c[5])
-        : "r"(a[0]),  "r"(a[1]),  "r"(a[2]),  "r"(a[3]),
-          "r"(b[0]),  "r"(b[2])
-    );
-
-    asm volatile(
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%0, %1, %2, %3};\n"
-        : "+f"(c[2]), "+f"(c[3]), "+f"(c[6]), "+f"(c[7])
-        : "r"(a[0]),  "r"(a[1]),  "r"(a[2]),  "r"(a[3]),
-          "r"(b[1]),  "r"(b[3])
-    );
-}
-
-
-__device__ inline void store_mma_result(
-    float (&c)[8],
-    half* ptr,
-    int M,
-    int lane_id)
-{
-    int offset = (lane_id / 4) * M + (lane_id % 4) * 2;
-    ptr[offset]     = __float2half(c[0]);
-    ptr[offset + 1] = __float2half(c[1]);
-    ptr[offset + 8] = __float2half(c[2]);
-    ptr[offset + 9] = __float2half(c[3]);
-
-    offset += 8 * M;
-
-    ptr[offset]     = __float2half(c[4]);
-    ptr[offset + 1] = __float2half(c[5]);
-    ptr[offset + 8] = __float2half(c[6]);
-    ptr[offset + 9] = __float2half(c[7]);
-}
-
-
-__device__ inline void atomicMaxFloat(float* addr, float value) {
-    float old = *addr;
-    while (value > old) {
-        float temp = atomicCAS(reinterpret_cast<unsigned int*>(addr),
-                               __float_as_int(old),
-                               __float_as_int(value));
-        old = __int_as_float(temp);
-    }
+    return (static_cast<uint32_t>(b_bits) << 16u) | a_bits;
 }

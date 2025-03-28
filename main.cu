@@ -296,8 +296,21 @@ int main(){
 
     launchKernel(param2, forward_kernel_3, param2.Tr, N_HEAD, BATCH_SIZE, (param2.Br/16)*(param2.Bc/16)*32, sram_size2, O, O_host, O_device, 0.04);
     // ************************************kernel_4*************************************************************************************
-    launchKernel(param2, forward_kernel_4, param2.Tr, N_HEAD, BATCH_SIZE, (param2.Br/16)*(param2.Bc/16)*32, sram_size2, O, O_host, O_device, 0.04);
-
+    mykernelParamType2 param4;
+    param4.Q             = Q_device_half;
+    param4.K             = K_device_half;
+    param4.V             = V_device_half;
+    param4.O             = O_device;
+    param4.N             = SEQ_LEN;
+    param4.d             = HEAD_EMBD;
+    param4.Bc            = Bc4;
+    param4.Br            = Br4;
+    param4.Tc            = ceil(SEQ_LEN / param4.Bc);
+    param4.Tr            = ceil(SEQ_LEN / param4.Br);
+    param4.softmax_scale = 1.0 / sqrt(HEAD_EMBD);
+    
+    launchKernel(param4, forward_kernel_4, param2.Tr, N_HEAD, BATCH_SIZE, (param4.Br/16)*32, sram_size2, O, O_host, O_device, 0.04);
+    // *********************************************************************************************************************************
 
     cudaFree(Q_device);
     cudaFree(K_device);

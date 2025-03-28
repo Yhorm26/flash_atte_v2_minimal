@@ -9,8 +9,10 @@
 
 #define Br1 32   // 用于kernel1和kernel2
 #define Bc1 32   // 用于kernel1和kernel2
-#define Br2 32   // 用于后续kernel
-#define Bc2 64   // 用于后续kernel
+#define Br2 64   // 用于后续kernel
+#define Bc2 16   // 用于后续kernel
+#define Br4 64
+#define Bc4 16
 
 typedef struct mykernelParamType
 {
@@ -48,7 +50,7 @@ typedef struct mykernelParamType2
 __global__ void forward_kernel_1(mykernelParamType   param);   // 最简单的实现
 __global__ void forward_kernel_2(mykernelParamType   param);   // 寄存器优化
 __global__ void forward_kernel_3(mykernelParamType2  param);   // Tensor core优化
-__global__ void forward_kernel_4(mykernelParamType2  param);
+__global__ void forward_kernel_4(mykernelParamType2  param);   //MMA和ldmatrix指令
 // 后续更新
 
 #endif // KERNEL_H

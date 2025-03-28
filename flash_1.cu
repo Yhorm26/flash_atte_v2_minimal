@@ -79,6 +79,7 @@ void forward_kernel_1(mykernelParamType param) {
             O[(tx * param.d) + x] = (1 / row_l_new) * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[(tx * param.d) + x]) \
                 + (__expf(row_m - row_m_new) * pv));
         }
+        
 
         __syncthreads();
 
