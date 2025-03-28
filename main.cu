@@ -295,7 +295,9 @@ int main(){
     printf("Max shared memory: %d, kernel_3 requested shared memory: %d \n", max_sram_size, sram_size + param.d * param.Br * 4);
 
     launchKernel(param2, forward_kernel_3, param2.Tr, N_HEAD, BATCH_SIZE, (param2.Br/16)*(param2.Bc/16)*32, sram_size2, O, O_host, O_device, 0.04);
-    // ****************************************************************************************************************************
+    // ************************************kernel_4*************************************************************************************
+    launchKernel(param2, forward_kernel_4, param2.Tr, N_HEAD, BATCH_SIZE, (param2.Br/16)*(param2.Bc/16)*32, sram_size2, O, O_host, O_device, 0.04);
+
 
     cudaFree(Q_device);
     cudaFree(K_device);
